@@ -1,0 +1,5 @@
+biopython
+bwa
+samtools
+blast
+spades
