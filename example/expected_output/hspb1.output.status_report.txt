@@ -1,0 +1,2 @@
+GeneID	Status	Details
+L_crocea_hspb1	OK
