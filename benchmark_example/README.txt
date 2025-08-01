@@ -1,19 +1,59 @@
-# Example: Gene assembly from simulated reads
+# Benchmark Example: `assemble_gene` vs SPAdes
 
-This folder contains a reproducible test case for the `assemble_gene` tool.
+This folder provides a reproducible example to benchmark the performance of the `assemble_gene` tool against the SPAdes assembler, using simulated reads for a single gene of interest.
 
-## Files
+The benchmark evaluates:
+- Number of contigs generated
+- Alignment length and identity to the reference gene
+- Execution time (wall-clock)
+- Maximum memory usage
 
-- `hspb1_with_utrs.fasta`: Target gene including 200 bp upstream and downstream extensions.
-- `hspb1_simulated1.fq`, `hspb1_simulated2.fq`: Paired-end Illumina reads (150 bp), 50× coverage.
-- `expected_output/putative_gene_with_utrs.fasta`: Expected result of the gene assembly.
+---
 
-## How to run
+## Requirements
+
+Before running this benchmark, ensure you have the following installed:
+
+- Python 3.7+
+- [SPAdes](https://cab.spbu.ru/software/spades/) (≥ v3.15)
+- [BLAST+](https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/LATEST/)
+- `/usr/bin/time` (Linux system utility)
+- Python packages:
+  - `biopython`
+  - `openpyxl`
+
+You can install the required Python packages with:
 
 ```bash
-assemble_gene \
-    --r1 hspb1_simulated1.fq \
-    --r2 hspb1_simulated2.fq \
-    --reference hspb1_with_utrs.fasta \
-    --output output_dir \
-    --extension
+pip install biopython openpyxl
+
+python3 benchmark.py \
+  --reads1 example/hspb1_simulated1.fq \
+  --reads2 example/hspb1_simulated2.fq \
+  --query example/hspb1.fasta \
+  --extension 100
+Output File: benchmark_results.xlsx
+This spreadsheet includes the following columns for each tool:
+
+Assembler
+
+Contigs (number of sequences in output)
+
+Alignment Length (vs. reference gene)
+
+Identity (%) (BLAST match percentage)
+
+Elapsed Time (s) (wall-clock execution time)
+
+Max Memory (KB) (peak memory used)
+
+Notes
+The file assemble_gene.py must be located in the same folder as benchmark.py or be available in your system PATH.
+
+The output file from assemble_gene must end with putative_gene_with_utrs.fasta, as it is automatically detected by the benchmark script.
+
+Contact
+For questions or suggestions, please open an issue on the GitHub repository or contact the authors directly.
+
+---
+
