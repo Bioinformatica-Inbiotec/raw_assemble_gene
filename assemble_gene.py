@@ -42,29 +42,35 @@ def run_spades(aligned_reads, outdir):
         raise FileNotFoundError("ERROR: contigs.fasta no fue generado por SPAdes.")
     return contigs_path
 
-def find_best_contig(query_seq, contigs):
+def find_best_contig(query_seq, contigs_path):
+    from Bio import Align
+    from Bio import SeqIO
+
     aligner = Align.PairwiseAligner()
     aligner.mode = 'local'
-    aligner.match_score = 2
+    aligner.match_score = 1
     aligner.mismatch_score = -1
-    aligner.open_gap_score = -0.5
-    aligner.extend_gap_score = -0.1
+    aligner.open_gap_score = -2
+    aligner.extend_gap_score = -0.5
 
+    min_score = len(query_seq) * 0.75  # Umbral más flexible
+
+    best_score = 0
     best_contig = None
-    best_score = -1
-    query = str(query_seq.seq)
 
-    for contig in SeqIO.parse(contigs, "fasta"):
-        score = aligner.score(str(contig.seq), query)
+    for contig in SeqIO.parse(contigs_path, "fasta"):
+        score = aligner.score(contig.seq, query_seq.seq)
         if score > best_score:
             best_score = score
             best_contig = contig
 
-    min_expected_score = len(query) * 1.2
-    if not best_contig or best_score < min_expected_score:
-        raise ValueError(f"No se encontró ningún contig con similitud significativa al gen (score máximo={best_score}, requerido>{min_expected_score:.1f}).")
+    if best_score < min_score:
+        print(f"[WARNING] {query_seq.id}: No se encontró un contig con similitud completa. Se utilizará el mejor fragmento parcial (score={best_score:.1f}, requerido>{min_score:.1f}).")
+        if best_contig is None:
+            raise ValueError(f"{query_seq.id}: No se encontró ningún contig con similitud significativa.")
 
     return best_contig
+
 
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
@@ -73,6 +79,12 @@ import subprocess
 import os
 
 def extend_contig_with_utrs(best_contig, query_seq, extension_length, spades_dir, reads1, reads2):
+    from Bio import Align
+    from Bio.SeqRecord import SeqRecord
+    from Bio.Seq import Seq
+    import os
+    import subprocess
+
     contig_seq = str(best_contig.seq)
     gene_seq = str(query_seq.seq)
 
@@ -81,66 +93,35 @@ def extend_contig_with_utrs(best_contig, query_seq, extension_length, spades_dir
     alignment = aligner.align(contig_seq, gene_seq)[0]
 
     if alignment.score == 0 or len(alignment.aligned) == 0:
-        raise ValueError("La secuencia del gen no fue encontrada en el mejor contig.")
+        raise ValueError("El gen no se alinea con el contig. Posiblemente el ensamblado falló.")
 
     contig_aligned_regions, _ = alignment.aligned
     start = contig_aligned_regions[0][0]
     end = contig_aligned_regions[-1][1]
 
-    # Flanqueo original del contig
+    # Calcular las regiones extendidas deseadas
     extended_start = max(0, start - extension_length)
     extended_end = min(len(contig_seq), end + extension_length)
-    core_seq = contig_seq[extended_start:extended_end]
+    extended_seq = contig_seq[extended_start:extended_end]
 
+    # Coordenadas relativas dentro de la secuencia extendida
     gene_start = start - extended_start
     gene_end = gene_start + (end - start)
 
-    # Buscar lecturas que extiendan por fuera del contig usando minimap2
-    temp_contig_path = os.path.join(spades_dir, "temp_contig.fasta")
-    with open(temp_contig_path, "w") as f:
-        f.write(f">contig\n{contig_seq}\n")
-
-    sam_output = os.path.join(spades_dir, "align_reads_to_contig.sam")
-    cmd = f"minimap2 -ax sr {temp_contig_path} {reads1} {reads2} > {sam_output}"
-    subprocess.run(cmd, shell=True, check=True)
-
-    five_prime_extension = ""
-    three_prime_extension = ""
-
-    with open(sam_output) as sam:
-        for line in sam:
-            if line.startswith("@"):
-                continue
-            fields = line.strip().split("\t")
-            flag = int(fields[1])
-            pos = int(fields[3])
-            seq = fields[9]
-
-            if pos < start and (start - pos) <= extension_length:
-                extra = seq[:start - pos]
-                if len(extra) > len(five_prime_extension):
-                    five_prime_extension = extra
-
-            elif pos > end and (pos - end) <= extension_length:
-                extra = seq[(end - pos):]
-                if len(extra) > len(three_prime_extension):
-                    three_prime_extension = extra
-
-    # Preparar secuencia final
-    extended_seq = (
-        five_prime_extension.lower() +
-        core_seq[:gene_start].lower() +
-        core_seq[gene_start:gene_end].upper() +
-        core_seq[gene_end:].lower() +
-        three_prime_extension.lower()
+    # Crear secuencia anotada con UTRs en minúscula
+    annotated_seq = (
+        extended_seq[:gene_start].lower() +
+        extended_seq[gene_start:gene_end].upper() +
+        extended_seq[gene_end:].lower()
     )
 
-    # Agregar advertencia si no hubo extensiones reales
-    description = "putative_gene_with_utrs"
-    if not five_prime_extension and not three_prime_extension:
-        description += " (warning: no UTRs extended due to lack of overlapping reads)"
+    # Validar si se pudo extender, y si no, avisar
+    if gene_start == 0:
+        print(f"[WARNING] {query_seq.id}: No se pudo extender el 5'-UTR (no hay suficiente secuencia antes del gen).")
+    if gene_end == len(annotated_seq):
+        print(f"[WARNING] {query_seq.id}: No se pudo extender el 3'-UTR (no hay suficiente secuencia después del gen).")
 
-    return SeqRecord(Seq(extended_seq), id=query_seq.id, description=description)
+    return SeqRecord(Seq(annotated_seq), id=query_seq.id, description="putative_gene_with_utrs")
 
 def analyze_coverage(contigs_fasta, reads1, reads2, outdir):
     print("Analizando cobertura del ensamblado...")
@@ -237,7 +218,7 @@ def main():
     parser.add_argument("--original_reads2", help="Lecturas reverse originales")
     parser.add_argument("--minimap2_args", default="", help="Argumentos extra para minimap2")
     parser.add_argument("--extension", type=int, default=0, help="Tamaño de extensión UTR")
-    parser.add_argument("--output_prefix", default="gene", help="Prefijo de salida")
+    parser.add_argument("--output_prefix", default="genes", help="Prefijo general para reporte final")
     args = parser.parse_args()
 
     original_reads1 = args.original_reads1 or args.reads1
@@ -247,17 +228,23 @@ def main():
 
     for query_seq in SeqIO.parse(args.query, "fasta"):
         gene_id = query_seq.id
-        gene_prefix = f"{args.output_prefix}_{gene_id}"
         try:
-            aligned_reads = get_aligned_reads(args.query, args.reads1, args.reads2, args.minimap2_args, gene_prefix)
-            spades_dir = os.path.join(f"{gene_prefix}.output", "spades_output")
+            aligned_reads = get_aligned_reads(
+                args.query, args.reads1, args.reads2,
+                args.minimap2_args, gene_id
+            )
+
+            spades_dir = os.path.join(f"{gene_id}.output", "spades_output")
             os.makedirs(spades_dir, exist_ok=True)
 
             contigs_path = run_spades(aligned_reads, spades_dir)
             best_contig = find_best_contig(query_seq, contigs_path)
-            annotated = extend_contig_with_utrs(best_contig, query_seq, args.extension, spades_dir, original_reads1, original_reads2)
+            annotated = extend_contig_with_utrs(
+                best_contig, query_seq, args.extension,
+                spades_dir, original_reads1, original_reads2
+            )
 
-            output_fasta = f"{gene_prefix}.putative_gene_with_utrs.fasta"
+            output_fasta = f"{gene_id}.putative_gene_with_utrs.fasta"
             SeqIO.write(annotated, output_fasta, "fasta")
             print(f"[OK] {gene_id} guardado en {output_fasta}")
             status_lines.append(f"{gene_id}\tOK")
@@ -269,6 +256,7 @@ def main():
             print(f"[ERROR] {gene_id}: {e}")
             status_lines.append(f"{gene_id}\tERROR\t{e}")
 
+    # Nombre del reporte final general
     with open(f"{args.output_prefix}.status_report.txt", "w") as f:
         f.write("GeneID\tStatus\tDetails\n")
         for line in status_lines:
